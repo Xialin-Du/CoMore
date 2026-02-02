@@ -1,0 +1,128 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK']='TRUE'
+import pandas as pd
+import numpy as np
+from neuralforecast.models import PatchTST
+from neuralforecast.core import NeuralForecast
+import matplotlib.pyplot as plt
+from neuralforecast.losses.numpy import mae, rmse, mse
+import torch
+
+torch.set_float32_matmul_precision('high')
+
+torch.manual_seed(42)
+np.random.seed(42)
+
+df = pd.read_excel('step4-val.xlsx')
+df['unique_id'] = 1
+df = df.rename(columns={'date': 'ds', 'Close': 'y'})
+df['ds'] = pd.to_datetime(df['ds'])
+y_mean = df['y'].mean()
+y_std = df['y'].std()
+df['y'] = (df['y'] - y_mean) / y_std
+
+horizon = 1
+input_size = 31
+train_steps = 8000
+check_steps = 10
+
+models = [
+    PatchTST(
+        h=horizon,
+        input_size=input_size,
+        max_steps=train_steps,
+        val_check_steps=check_steps,
+        early_stop_patience_steps=3,
+        start_padding_enabled=True,
+        accelerator='gpu'
+    )
+]
+
+nf = NeuralForecast(
+    models=models,
+    freq='B'
+)
+
+Y_hat_df = nf.cross_validation(
+    df=df,
+    val_size=1000,
+    test_size=1000,
+    n_windows=None
+)
+Y_hat_df['y'] = Y_hat_df['y'] * y_std + y_mean
+Y_hat_df['PatchTST'] = Y_hat_df['PatchTST'] * y_std + y_mean
+
+def calculate_smape(y_true, y_pred):
+    denominator = (np.abs(y_true) + np.abs(y_pred)) / 2
+    non_zero_indices = denominator != 0
+    return 100 * np.mean(np.abs(y_true[non_zero_indices] - y_pred[non_zero_indices]) / denominator[non_zero_indices])
+
+smape_original = calculate_smape(Y_hat_df['y'].values, Y_hat_df['PatchTST'].values)
+print(f"原始预测SMAPE: {smape_original:.2f}%")
+
+def calculate_comprehensive_confidence(smape, rmse, mae, y_true, confidence_level=0.95):
+    data_variability = np.std(y_true)
+    
+    smape_norm = max(0, 1 - smape / 100)
+    rmse_norm = max(0, 1 - rmse / data_variability)
+    mae_norm = max(0, 1 - mae / data_variability)
+    
+    weights = {'smape': 0.4, 'rmse': 0.35, 'mae': 0.25}
+    
+    raw_confidence = (
+        weights['smape'] * smape_norm +
+        weights['rmse'] * rmse_norm + 
+        weights['mae'] * mae_norm
+    )
+    
+    calibrated_confidence = raw_confidence ** (1 / confidence_level)
+    return min(1.0, calibrated_confidence)
+
+
+
+Y_plot = Y_hat_df.copy()
+cutoffs = Y_plot['cutoff'].unique()[::horizon]
+Y_plot = Y_plot[Y_plot['cutoff'].isin(cutoffs)]
+plt.figure(figsize=(20, 5))
+plt.plot(Y_plot['ds'], Y_plot['y'], label='True', color='black')
+plt.plot(Y_plot['ds'], Y_plot['PatchTST'], label='PatchTST', alpha=0.7)
+
+rmse_value = rmse(Y_hat_df['y'], Y_hat_df['PatchTST'])
+mae_value = mae(Y_hat_df['y'], Y_hat_df['PatchTST'])
+mse_value = mse(Y_hat_df['y'], Y_hat_df['PatchTST'])
+total_fitted = len(Y_hat_df)  
+
+print(f'RMSE: {rmse_value:.4f}')
+print(f'MAE: {mae_value:.4f}')
+print(f'MSE: {mse_value:.4f}')
+print(f'总拟合数值数量: {total_fitted}')
+
+comprehensive_confidence = calculate_comprehensive_confidence(
+    smape_original, 
+    rmse_value, 
+    mae_value, 
+    Y_hat_df['y'].values
+)
+
+print(f"综合置信度: {comprehensive_confidence:.3f}")
+
+if comprehensive_confidence >= 0.9:
+    confidence_level = "极高"
+elif comprehensive_confidence >= 0.7:
+    confidence_level = "高" 
+elif comprehensive_confidence >= 0.5:
+    confidence_level = "中等"
+else:
+    confidence_level = "低"
+
+print(f"置信等级: {confidence_level}")
+
+Y_hat_df.to_excel('PatchTST_forecasts_1210.xlsx', index=False)
+
+plt.xlabel('Date')
+plt.ylabel('Traffic')
+plt.title('Network Traffic Prediction')
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()

@@ -1,0 +1,345 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (
+    Input, Dense, LSTM, Conv1D, Dropout, Bidirectional,
+    Multiply, Flatten, Permute, Lambda, RepeatVector
+)
+from tensorflow.keras import backend as K
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from sklearn.model_selection import train_test_split
+import time
+import os
+
+np.random.seed(42)
+tf.random.set_seed(42)
+
+SINGLE_ATTENTION_VECTOR = False
+
+def attention_3d_block(inputs):
+    input_dim = int(inputs.shape[2])
+    a = inputs
+    a = Dense(input_dim, activation='softmax')(a)
+    if SINGLE_ATTENTION_VECTOR:
+        a = Lambda(lambda x: K.mean(x, axis=1), name='dim_reduction')(a)
+        a = RepeatVector(input_dim)(a)
+    a_probs = Permute((1, 2), name='attention_vec')(a)
+    output_attention_mul = Multiply()([inputs, a_probs])
+    return output_attention_mul
+
+def create_dataset(dataset, look_back):
+    dataX, dataY = [], []
+    for i in range(len(dataset)-look_back-1):
+        dataX.append(dataset[i:(i+look_back)])
+        dataY.append(dataset[i + look_back])
+    return np.array(dataX), np.array(dataY)
+
+def NormalizeMult(data):
+    data = np.array(data)
+    normalize = np.arange(2*data.shape[1], dtype='float64').reshape(data.shape[1], 2)
+        for i in range(data.shape[1]):
+        list_data = data[:, i]
+        listlow, listhigh = np.percentile(list_data, [0, 100])
+        normalize[i, 0] = listlow
+        normalize[i, 1] = listhigh
+        delta = listhigh - listlow
+        if delta != 0:
+            for j in range(data.shape[0]):
+                data[j, i] = (data[j, i] - listlow) / delta
+    return data, normalize
+
+def FNormalizeMult(data, normalize):
+    data = np.array(data)
+    for i in range(data.shape[1]):
+        listlow = normalize[i, 0]
+        listhigh = normalize[i, 1]
+        delta = listhigh - listlow
+        if delta != 0:
+            for j in range(data.shape[0]):
+                data[j, i] = data[j, i] * delta + listlow
+    return data
+
+def r2_keras(y_true, y_pred):
+    SS_res = K.sum(K.square(y_true - y_pred))
+    SS_tot = K.sum(K.square(y_true - K.mean(y_true)))
+    return (1 - SS_res/(SS_tot + K.epsilon()))
+
+def attention_model(time_steps, input_dims, lstm_units=64, drop=0.2):
+    inputs = Input(shape=(time_steps, input_dims))
+    
+    x = Conv1D(filters=64, kernel_size=1, activation='relu')(inputs)
+    x = Dropout(drop)(x)
+    
+    lstm_out = Bidirectional(LSTM(lstm_units, return_sequences=True))(x)
+    lstm_out = Dropout(drop)(lstm_out)
+    attention_mul = attention_3d_block(lstm_out)
+    attention_mul = Flatten()(attention_mul)
+    
+    output = Dense(1, activation='linear')(attention_mul)
+    model = Model(inputs=[inputs], outputs=output)
+    return model
+
+def calculate_smape(y_true, y_pred):
+    return 100 * np.mean(2 * np.abs(y_pred - y_true) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
+
+def calculate_comprehensive_confidence(smape, rmse, mae, y_true, confidence_level=0.95):
+    data_variability = np.std(y_true)
+    
+    smape_norm = max(0, 1 - smape / 100)
+    rmse_norm = max(0, 1 - rmse / data_variability)
+    mae_norm = max(0, 1 - mae / data_variability)
+    
+    weights = {'smape': 0.4, 'rmse': 0.35, 'mae': 0.25}
+    
+    raw_confidence = (
+        weights['smape'] * smape_norm +
+        weights['rmse'] * rmse_norm + 
+        weights['mae'] * mae_norm
+    )
+    
+    calibrated_confidence = raw_confidence ** (1 / confidence_level)
+    return min(1.0, calibrated_confidence)
+
+def main():
+    TIME_STEPS = 100  
+    LST_UNITS = 128  
+    DROP_RATE = 0.2
+    EPOCHS = 200  
+    BATCH_SIZE = 32  
+    
+    # 请将文件路径修改为实际文件路径
+    df = pd.read_excel("Data.xlsx")  
+    
+    # 并确保数据包含ds和y列
+    if 'ds' not in df.columns or 'y' not in df.columns:
+        raise ValueError("数据必须包含'ds'和'y'列")
+    
+    df['ds'] = pd.to_datetime(df['ds'], format='%Y-%m-%d %H-%M-%S')
+    df = df.sort_values('ds').reset_index(drop=True)
+    
+    print(f"数据量: {len(df)}")
+    print(f"日期范围: {df['ds'].min()} 到 {df['ds'].max()}")
+    
+    plt.figure(figsize=(15, 6))
+  
+    if len(df) > 10000:
+        df_daily = df.copy()
+        df_daily['date'] = df_daily['ds'].dt.date
+        daily_agg = df_daily.groupby('date')['y'].mean().reset_index()
+        plt.plot(daily_agg['date'], daily_agg['y'])
+        plt.title('网络流量数据时间序列 (日聚合视图)')
+    else:
+        plt.plot(df['ds'], df['y'])
+        plt.title('网络流量数据时间序列')
+    
+    plt.xlabel('时间')
+    plt.ylabel('流量值')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+    
+    data = df[['y']].values
+    
+    train_size = int(len(data) * 0.9)
+    train_data = data[:train_size]
+    test_data = data[train_size:]
+    
+    print(f"训练集大小: {len(train_data)}")
+    print(f"测试集大小: {len(test_data)}")
+    
+    train_normalized, normalize_params = NormalizeMult(train_data)
+    
+    test_normalized = test_data.copy().astype(float)
+    for i in range(test_normalized.shape[1]):
+        listlow = normalize_params[i, 0]
+        listhigh = normalize_params[i, 1]
+        delta = listhigh - listlow
+        if delta != 0:
+            for j in range(test_normalized.shape[0]):
+                test_normalized[j, i] = (test_normalized[j, i] - listlow) / delta
+    
+    train_X, train_Y = create_dataset(train_normalized, TIME_STEPS)
+    test_X, test_Y = create_dataset(test_normalized, TIME_STEPS)
+    
+    print(f"训练集形状: X {train_X.shape}, Y {train_Y.shape}")
+    print(f"测试集形状: X {test_X.shape}, Y {test_Y.shape}")
+    
+    model = attention_model(TIME_STEPS, 1, LST_UNITS, DROP_RATE)
+    model.summary()
+    
+    model.compile(optimizer='adam', loss='mae', metrics=['mae', r2_keras])
+    
+    callbacks = [
+        EarlyStopping(patience=15, restore_best_weights=True),  
+        ModelCheckpoint('best_model.h5', save_best_only=True)
+    ]
+    
+    start_time = time.time()
+    
+    train_X_final, val_X, train_Y_final, val_Y = train_test_split(
+        train_X, train_Y, test_size=0.1, random_state=42  
+    )
+    
+    history = model.fit(
+        train_X_final, train_Y_final,
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        validation_data=(val_X, val_Y),
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    end_time = time.time()
+    print(f"训练完成，耗时: {end_time - start_time:.2f}秒")
+    
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['loss'], label='训练损失')
+    plt.plot(history.history['val_loss'], label='验证损失')
+    plt.title('模型损失')
+    plt.ylabel('损失')
+    plt.xlabel('轮次')
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['r2_keras'], label='训练R²')
+    plt.plot(history.history['val_r2_keras'], label='验证R²')
+    plt.title('模型R²')
+    plt.ylabel('R²')
+    plt.xlabel('轮次')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print("进行验证集预测")
+    val_predictions = model.predict(val_X, batch_size=BATCH_SIZE)
+    val_Y_denorm = val_Y * (normalize_params[0, 1] - normalize_params[0, 0]) + normalize_params[0, 0]
+    val_predictions_denorm = val_predictions * (normalize_params[0, 1] - normalize_params[0, 0]) + normalize_params[0, 0]
+    
+    display_samples = min(1000, len(val_Y_denorm))
+    plt.figure(figsize=(15, 6))
+    plt.plot(val_Y_denorm[:display_samples], label='真实值', alpha=0.7)
+    plt.plot(val_predictions_denorm[:display_samples], label='预测值', alpha=0.7)
+    plt.title(f'验证集预测对比 (前{display_samples}个样本)')
+    plt.ylabel('流量值')
+    plt.xlabel('样本索引')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    
+    val_results = pd.DataFrame({
+        '真实值': val_Y_denorm.flatten(),
+        '预测值': val_predictions_denorm.flatten(),
+        '绝对误差': np.abs(val_Y_denorm.flatten() - val_predictions_denorm.flatten()),
+        '相对误差(%)': np.abs((val_Y_denorm.flatten() - val_predictions_denorm.flatten()) / val_Y_denorm.flatten()) * 100
+    })
+    
+    val_dates = df['ds'].iloc[TIME_STEPS:TIME_STEPS+len(val_results)].reset_index(drop=True)
+    val_results['日期'] = val_dates
+    
+    val_results.to_excel('validation_predictions.xlsx', index=False)
+    print("验证集预测结果已保存到 'validation_predictions.xlsx'")
+    
+    from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+  
+    def mean_absolute_percentage_error(y_true, y_pred):
+        return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    
+    r2 = r2_score(val_Y_denorm, val_predictions_denorm)
+    rmse = np.sqrt(mean_squared_error(val_Y_denorm, val_predictions_denorm))
+    mae = mean_absolute_error(val_Y_denorm, val_predictions_denorm)
+    mape = mean_absolute_percentage_error(val_Y_denorm, val_predictions_denorm)
+    
+    print("\n验证集评估结果:")
+    print(f"R²决定系数: {r2:.4f}")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"MAE: {mae:.4f}")
+    print(f"MAPE: {mape:.4f}%")
+    
+    print("\n进行测试集预测...")
+    test_predictions = model.predict(test_X, batch_size=BATCH_SIZE)
+    
+    test_Y_denorm = test_Y * (normalize_params[0, 1] - normalize_params[0, 0]) + normalize_params[0, 0]
+    test_predictions_denorm = test_predictions * (normalize_params[0, 1] - normalize_params[0, 0]) + normalize_params[0, 0]
+    
+    original_test_Y = test_data[TIME_STEPS:TIME_STEPS+len(test_Y_denorm)]
+    
+    diff = np.abs(original_test_Y.flatten() - test_Y_denorm.flatten())
+    max_diff = np.max(diff)
+    
+    display_samples_test = min(1500, len(test_Y_denorm))
+    plt.figure(figsize=(15, 6))
+    plt.plot(test_Y_denorm[:display_samples_test], label='真实值', alpha=0.7)
+    plt.plot(test_predictions_denorm[:display_samples_test], label='预测值', alpha=0.7)
+    plt.title(f'测试集预测对比 (前{display_samples_test}个样本)')
+    plt.ylabel('流量值')
+    plt.xlabel('样本索引')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    
+    r2_test = r2_score(original_test_Y, test_predictions_denorm)
+    rmse_test = np.sqrt(mean_squared_error(original_test_Y, test_predictions_denorm))
+    mae_test = mean_absolute_error(original_test_Y, test_predictions_denorm)
+    mape_test = mean_absolute_percentage_error(original_test_Y, test_predictions_denorm)
+
+    smape_test = calculate_smape(original_test_Y, test_predictions_denorm)
+    mse_test = mean_squared_error(original_test_Y, test_predictions_denorm)
+    
+    comprehensive_confidence = calculate_comprehensive_confidence(
+        smape_test, 
+        rmse_test, 
+        mae_test, 
+        original_test_Y.flatten()
+    )
+    
+    if comprehensive_confidence >= 0.9:
+        confidence_level = "极高"
+    elif comprehensive_confidence >= 0.7:
+        confidence_level = "高" 
+    elif comprehensive_confidence >= 0.5:
+        confidence_level = "中等"
+    else:
+        confidence_level = "低"
+    
+    print("\n测试集评估结果:")
+    print(f"R²决定系数: {r2_test:.4f}")
+    print(f"RMSE: {rmse_test:.4f}")
+    print(f"MAE: {mae_test:.4f}")
+    print(f"MAPE: {mape_test:.4f}%")
+    print(f"SMAPE: {smape_test:.4f}%")
+    print(f"MSE: {mse_test:.6f}")
+    print(f"综合置信度: {comprehensive_confidence:.3f}")
+    print(f"置信等级: {confidence_level}")
+    
+    test_results = pd.DataFrame({
+        '真实值': original_test_Y.flatten(),  
+        '预测值': test_predictions_denorm.flatten(),
+        '绝对误差': np.abs(original_test_Y.flatten() - test_predictions_denorm.flatten()),
+        '相对误差(%)': np.abs((original_test_Y.flatten() - test_predictions_denorm.flatten()) / original_test_Y.flatten()) * 100
+    })
+    
+    test_start_idx = train_size + TIME_STEPS
+    test_end_idx = test_start_idx + len(test_results)
+    test_dates = df['ds'].iloc[test_start_idx:test_end_idx].reset_index(drop=True)
+    test_results['日期'] = test_dates
+    
+    metrics_df = pd.DataFrame({
+        '指标': ['R²', 'RMSE', 'MAE', 'MAPE(%)', 'SMAPE(%)', 'MSE', '综合置信度', '置信等级'],
+        '值': [r2_test, rmse_test, mae_test, mape_test, smape_test, mse_test, comprehensive_confidence, confidence_level]
+    })
+    
+    with pd.ExcelWriter('test_predictions.xlsx') as writer:
+        test_results.to_excel(writer, sheet_name='预测结果', index=False)
+        metrics_df.to_excel(writer, sheet_name='评估指标', index=False)
+    
+    print("测试集预测结果和评估指标已保存到 'test_predictions.xlsx'")
+
+if __name__ == "__main__":
+    main()
