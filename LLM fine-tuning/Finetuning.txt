@@ -1,0 +1,125 @@
+import pandas as pd
+import numpy as np
+import requests
+import json
+import re
+from datetime import datetime, timedelta
+import warnings
+from scipy import stats
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.linear_model import LinearRegression
+warnings.filterwarnings('ignore')
+
+#Define model parameters
+class ModelEvaluator:
+    def __init__(self, api_key, base_url, model_name):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.model_name = model_name
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+    
+#The following are the key functions defined, which will be completed once the source code is made public.
+    def calculate_transition_probability(self, data, bins=20):
+
+        
+        return transition_prob
+    
+    def calculate_trends(self, data, window_sizes=[24, 12, 6]):
+
+        
+        return long_trend, mid_trend, short_trend, data[-window_sizes[2]:]
+    
+    def analyze_data_characteristics(self, data):
+
+        
+        return stats_info
+    
+    def smape(self, y_true, y_pred):
+
+    
+    def evaluate_trend_consistency(self, historical_trend, prediction_trend, window='short'):
+
+        
+        return min(1, max(0, consistency_score))
+    
+    def prepare_evaluation_prompt(self, historical_data, model_predictions, model_confidences, val_data=None): 
+        return prompt
+    
+    def prepare_lag_analysis_prompt(self, historical_data, val_predictions, model_name, val_dates=None):
+        return prompt
+    
+    def apply_formula_adjustment(self, predictions, indices_to_adjust):
+             
+        return adjusted_predictions, adjustment_details
+    
+    def apply_full_sequence_adjustment(self, predictions):
+        return adjusted_predictions, adjustment_details
+    
+    def robust_fine_tune_indices_parsing(self, response_text):
+                   
+        return unique_indices
+            
+        
+    def fine_tune_predictions(self, historical_data, adjusted_predictions, model_name, dates=None):
+               
+        return {
+            "fine_tuned_predictions": fine_tuned_predictions,
+            "adjusted_indices": [detail['index'] for detail in adjustment_details],
+            "adjustment_details": adjustment_details,
+            "original_adjusted_predictions": adjusted_predictions,
+            "method": "formula_adjustment",
+            "llm_response": response
+        }
+    
+    def call_llm(self, prompt, temperature=0.2, max_tokens=2500):
+                  return None
+    
+    def robust_json_parse(self, text):
+           
+        return {"raw_output": text, "parse_error": True}
+    
+    def parse_evaluation_result(self, result_text):
+             return [model for model, _ in sorted(confidence_dict.items(), 
+                                           key=lambda x: x[1], reverse=True)]
+    
+    def adjust_predictions(self, original_predictions, lag_steps, historical_data):
+           
+        return adjusted_predictions
+    
+    def detect_lag_and_adjust(self, historical_data, best_model_name, model_predictions, val_data, val_dates=None):
+             
+        return final_result
+    
+    def confidence_based_adjustment(self, historical_data, best_model_name, model_predictions):
+        return final_result
+    
+    def save_adjusted_predictions(self, adjustment_result, excel_path, output_sheet_name=None):
+         
+    def check_sorting_consistency(self, evaluation_result, confidence_ranking):
+        return is_consistent, llm_ranking, confidence_ranking
+    
+    def evaluate_models(self, excel_path, model_sheets, confidence_dict, val_sheets=None):
+ 
+def main():
+    api_key = "your api"
+    base_url = "your url"
+    excel_path = "your data.xlsx"
+    model_name = "your model name"
+    
+    model_confidences = {
+        "PatchTST": your condidence,
+        "CLA": your condidence,
+    }
+    
+    model_sheets = ["PatchTST", "CLA"]
+    val_sheets = ["PatchTST_val", "CLA_val"]
+    
+    evaluator = ModelEvaluator(api_key, base_url, model_name)
+    
+    result = evaluator.evaluate_models(excel_path, model_sheets, model_confidences, val_sheets)
+    
+if __name__ == "__main__":
+    main()
