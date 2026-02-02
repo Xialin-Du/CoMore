@@ -1,4 +1,4 @@
-# 📖About LSM-MRCF
+# 📖About CoMore
 This repository contains the implementation of LSM-MRCF for accurate network traffic prediction. When reproducing, please make sure to modify the data format and the reference path.
 
 ## 🚀Running the model
